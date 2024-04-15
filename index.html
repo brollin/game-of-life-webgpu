@@ -121,48 +121,152 @@
         label: "Cell shader",
         code: `
 
-      struct VertexInput {
-        @location(0) pos: vec2f,
-        @builtin(instance_index) instance: u32,
-      };
+            struct VertexInput {
+              @location(0) pos: vec2f,
+              @builtin(instance_index) instance: u32,
+            };
 
-      struct VertexOutput {
-        @builtin(position) pos: vec4f,
-        @location(0) cell: vec2f,
-      };
+            struct VertexOutput {
+              @builtin(position) pos: vec4f,
+              @location(0) cell: vec2f,
+            };
+
+            @group(0) @binding(0) var<uniform> grid: vec2f;
+            @group(0) @binding(1) var<storage> cellState: array<u32>;
+
+            @vertex
+            fn vertexMain(input: VertexInput) -> VertexOutput {
+
+              let i = f32(input.instance); // Save the instance_index as a float
+              let cell = vec2f(i % grid.x, floor(i / grid.x));
+              let state = f32(cellState[input.instance]);
+
+              let cellOffset = cell / grid * 2; // Updated
+              let gridPos = (input.pos*state + 1) / grid - 1 + cellOffset;
+
+              var output: VertexOutput;
+                output.pos = vec4f(gridPos, 0, 1);
+                output.cell = cell;
+              return output;
+            }
+
+            @fragment
+            fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
+              let c = input.cell / grid;
+              return vec4f(c, 1-c.x, 1);
+            }
+
+
+                          `,
+      });
+
+      // this is a decent size for a workgroup size. it's not too big and not too small. when in
+      // doubt just use this
+      const WORKGROUP_SIZE = 8;
+
+      // Create the compute shader that will process the simulation.
+      const simulationShaderModule = device.createShaderModule({
+        label: "Game of Life simulation shader",
+        code: `
 
       @group(0) @binding(0) var<uniform> grid: vec2f;
-      @group(0) @binding(1) var<storage> cellState: array<u32>;
 
-      @vertex
-      fn vertexMain(input: VertexInput) -> VertexOutput {
+      @group(0) @binding(1) var<storage> cellStateIn: array<u32>;
+      @group(0) @binding(2) var<storage, read_write> cellStateOut: array<u32>;
 
-        let i = f32(input.instance); // Save the instance_index as a float
-        let cell = vec2f(i % grid.x, floor(i / grid.x));
-        let state = f32(cellState[input.instance]);
-
-        let cellOffset = cell / grid * 2; // Updated
-        let gridPos = (input.pos*state + 1) / grid - 1 + cellOffset;
-
-        var output: VertexOutput;
-          output.pos = vec4f(gridPos, 0, 1);
-          output.cell = cell;
-        return output;
+      fn cellIndex(cell: vec2u) -> u32 {
+        return cell.y * u32(grid.x) + cell.x;
       }
 
-      @fragment
-      fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
-        let c = input.cell / grid;
-        return vec4f(c, 1-c.x, 1);
+      @compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
+      fn computeMain(@builtin(global_invocation_id) cell: vec3u) {
+        // New lines. Flip the cell state every step.
+        if (cellStateIn[cellIndex(cell.xy)] == 1) {
+          cellStateOut[cellIndex(cell.xy)] = 0;
+        } else {
+          cellStateOut[cellIndex(cell.xy)] = 1;
+        }
       }
 
+          `,
+      });
 
-                    `,
+      // Create the bind group layout and pipeline layout.
+      const bindGroupLayout = device.createBindGroupLayout({
+        label: "Cell Bind Group Layout",
+        entries: [
+          {
+            binding: 0,
+            visibility:
+              GPUShaderStage.VERTEX |
+              GPUShaderStage.FRAGMENT |
+              GPUShaderStage.COMPUTE,
+            buffer: {}, // Grid uniform buffer
+          },
+          {
+            binding: 1,
+            visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE,
+            buffer: { type: "read-only-storage" }, // Cell state input buffer
+          },
+          {
+            binding: 2,
+            visibility: GPUShaderStage.COMPUTE,
+            buffer: { type: "storage" }, // Cell state output buffer
+          },
+        ],
+      });
+
+      // you use a bind group to connect the uniform in the shader to the uniform buffer
+      // the bind group is also opaque and this handle is immutable but the data in the buffer can be
+      // updated
+      const bindGroups = [
+        device.createBindGroup({
+          label: "Cell renderer bind group A",
+          layout: bindGroupLayout,
+          entries: [
+            {
+              binding: 0,
+              resource: { buffer: uniformBuffer },
+            },
+            {
+              binding: 1,
+              resource: { buffer: cellStateStorage[0] },
+            },
+            {
+              binding: 2,
+              resource: { buffer: cellStateStorage[1] },
+            },
+          ],
+        }),
+        device.createBindGroup({
+          label: "Cell renderer bind group B",
+          layout: bindGroupLayout,
+          entries: [
+            {
+              binding: 0,
+              resource: { buffer: uniformBuffer },
+            },
+            {
+              binding: 1,
+              resource: { buffer: cellStateStorage[1] },
+            },
+            {
+              binding: 2,
+              resource: { buffer: cellStateStorage[0] },
+            },
+          ],
+        }),
+      ];
+
+      const pipelineLayout = device.createPipelineLayout({
+        label: "Cell Pipeline Layout",
+        // this is a list of group layouts. First item corresponds to group 0, second to group 1, etc
+        bindGroupLayouts: [bindGroupLayout],
       });
 
       const cellPipeline = device.createRenderPipeline({
         label: "Cell pipeline",
-        layout: "auto",
+        layout: pipelineLayout,
         vertex: {
           module: cellShaderModule,
           entryPoint: "vertexMain",
@@ -179,47 +283,38 @@
         },
       });
 
-      // you use a bind group to connect the uniform in the shader to the uniform buffer
-      // the bind group is also opaque and this handle is immutable but the data in the buffer can be
-      // updated
-      const bindGroups = [
-        device.createBindGroup({
-          label: "Cell renderer bind group A",
-          layout: cellPipeline.getBindGroupLayout(0),
-          entries: [
-            {
-              binding: 0,
-              resource: { buffer: uniformBuffer },
-            },
-            {
-              binding: 1,
-              resource: { buffer: cellStateStorage[0] },
-            },
-          ],
-        }),
-        device.createBindGroup({
-          label: "Cell renderer bind group B",
-          layout: cellPipeline.getBindGroupLayout(0),
-          entries: [
-            {
-              binding: 0,
-              resource: { buffer: uniformBuffer },
-            },
-            {
-              binding: 1,
-              resource: { buffer: cellStateStorage[1] },
-            },
-          ],
-        }),
-      ];
+      // Create a compute pipeline that updates the game state.
+      const simulationPipeline = device.createComputePipeline({
+        label: "Simulation pipeline",
+        layout: pipelineLayout,
+        compute: {
+          module: simulationShaderModule,
+          entryPoint: "computeMain",
+        },
+      });
 
       const UPDATE_INTERVAL = 200; // Update every 200ms (5 times/sec)
       let step = 0; // Track how many simulation steps have been run
 
       function updateGrid() {
-        step++;
-
         const encoder = device.createCommandEncoder();
+        const computePass = encoder.beginComputePass();
+
+        console.log("computing");
+        computePass.setPipeline(simulationPipeline);
+        computePass.setBindGroup(0, bindGroups[step % 2]);
+
+        const workgroupCount = Math.ceil(GRID_SIZE / WORKGROUP_SIZE);
+        computePass.dispatchWorkgroups(workgroupCount, workgroupCount);
+
+        // If you want the shader to execute 32x32 times in order to cover your entire grid, and
+        // your workgroup size is 8x8, you need to dispatch 4x4 workgroups (4 * 8 = 32). That's why
+        // you divide the grid size by the workgroup size and pass that value into
+        // dispatchWorkgroups().
+
+        computePass.end();
+
+        step++;
 
         const pass = encoder.beginRenderPass({
           colorAttachments: [
