@@ -7,7 +7,139 @@
   <body>
     <canvas width="512" height="512"></canvas>
     <script type="module">
+      if (!navigator.gpu) {
+        throw new Error("WebGPU not supported on this browser.");
+      }
+
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) {
+        throw new Error("No appropriate GPUAdapter found.");
+      }
+
+      const device = await adapter.requestDevice();
+
       const canvas = document.querySelector("canvas");
+      const context = canvas.getContext("webgpu");
+      const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+      context.configure({
+        device: device,
+        format: canvasFormat,
+      });
+
+      // create a javascript typed array
+      const vertices = new Float32Array([
+        //   X,    Y,
+        -0.8,
+        -0.8, // Triangle 1 (Blue)
+        0.8,
+        -0.8,
+        0.8,
+        0.8,
+
+        -0.8,
+        -0.8, // Triangle 2 (Red)
+        0.8,
+        0.8,
+        -0.8,
+        0.8,
+      ]);
+
+      // we get that data to the gpu with a gpu buffer. this is also opaque once created. also its
+      // attributes are immutable but its memory can be updated
+      const vertexBuffer = device.createBuffer({
+        // every web gpu object can have a label and it is recommended for debugging
+        label: "Cell vertices",
+        // the size is always in bytes
+        // 12 floats * 4 bytes per float = 48 bytes
+        size: vertices.byteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+
+      // copy the data from the javascript array to the gpu buffer's memory
+      device.queue.writeBuffer(vertexBuffer, /*bufferOffset=*/ 0, vertices);
+
+      const vertexBufferLayout = {
+        // the size of each vertex in the buffer in bytes
+        arrayStride: 8,
+        // attributes are the individual pieces of info encoded into each vertex
+        // in this case we have a 2D position. might also have color or normal
+        attributes: [
+          {
+            // comes from a list of GPUVertexFormat types like float32x2, float32x3, etc
+            format: "float32x2",
+            // offset in bytes from the start of the vertex to the start of this attribute
+            offset: 0,
+            // arbitrary number between 0 and 15 that is used to identify this attribute in the
+            // shader. must be unique for each attribute in the shader
+            shaderLocation: 0, // Position, see vertex shader
+          },
+        ],
+      };
+
+      // SHADER
+      const cellShaderModule = device.createShaderModule({
+        label: "Cell shader",
+        code: `
+
+      @vertex
+      fn vertexMain(@location(0) pos: vec2f) ->
+        @builtin(position) vec4f {
+        return vec4f(pos, 0, 1);
+      }
+
+      @fragment
+      fn fragmentMain() -> @location(0) vec4f {
+        return vec4f(1, 0, 0, 1); // (Red, Green, Blue, Alpha)
+      }
+
+              `,
+      });
+
+      const cellPipeline = device.createRenderPipeline({
+        label: "Cell pipeline",
+        layout: "auto",
+        vertex: {
+          module: cellShaderModule,
+          entryPoint: "vertexMain",
+          buffers: [vertexBufferLayout],
+        },
+        fragment: {
+          module: cellShaderModule,
+          entryPoint: "fragmentMain",
+          targets: [
+            {
+              format: canvasFormat,
+            },
+          ],
+        },
+      });
+
+      const encoder = device.createCommandEncoder();
+
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: context.getCurrentTexture().createView(),
+            loadOp: "clear",
+            clearValue: { r: 0, g: 0, b: 0.4, a: 1 },
+            storeOp: "store",
+          },
+        ],
+      });
+
+      pass.setPipeline(cellPipeline);
+      pass.setVertexBuffer(0, vertexBuffer);
+      pass.draw(vertices.length / 2); // 6 vertices
+
+      pass.end();
+
+      // opaque handle to the recorded commands
+      const commandBuffer = encoder.finish();
+      // submit the commands to the GPU's queue
+      device.queue.submit([commandBuffer]);
+
+      // command buffers cannot be reused so it's possible to just do:
+      // device.queue.submit([encoder.finish()]);
     </script>
   </body>
 </html>
