@@ -17,7 +17,7 @@
   <body>
     <canvas width="512" height="512"></canvas>
     <script type="module">
-      const GRID_SIZE = 32;
+      const GRID_SIZE = 128;
 
       if (!navigator.gpu) {
         throw new Error("WebGPU not supported on this browser.");
@@ -89,13 +89,22 @@
       };
 
       // Create a uniform buffer that describes the grid.
-      const uniformArray = new Float32Array([GRID_SIZE, GRID_SIZE]);
-      const uniformBuffer = device.createBuffer({
+      const gridUniformArray = new Float32Array([GRID_SIZE, GRID_SIZE]);
+      const gridUniformBuffer = device.createBuffer({
         label: "Grid Uniforms",
-        size: uniformArray.byteLength,
+        size: gridUniformArray.byteLength,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
-      device.queue.writeBuffer(uniformBuffer, 0, uniformArray);
+      device.queue.writeBuffer(gridUniformBuffer, 0, gridUniformArray);
+
+      // Create a uniform buffer that holds the time
+      const timeUniformArray = new Float32Array([0]);
+      const timeUniformBuffer = device.createBuffer({
+        label: "Time Uniforms",
+        size: timeUniformArray.byteLength,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      device.queue.writeBuffer(timeUniformBuffer, 0, timeUniformArray);
 
       // Create an array representing the active state of each cell.
       const cellStateArray = new Uint32Array(GRID_SIZE * GRID_SIZE);
@@ -244,6 +253,14 @@
             visibility: GPUShaderStage.COMPUTE,
             buffer: { type: "storage" }, // Cell state output buffer
           },
+          {
+            binding: 3,
+            visibility:
+              GPUShaderStage.VERTEX |
+              GPUShaderStage.FRAGMENT |
+              GPUShaderStage.COMPUTE,
+            buffer: {}, // Time uniform buffer
+          },
         ],
       });
 
@@ -257,7 +274,7 @@
           entries: [
             {
               binding: 0,
-              resource: { buffer: uniformBuffer },
+              resource: { buffer: gridUniformBuffer },
             },
             {
               binding: 1,
@@ -266,6 +283,10 @@
             {
               binding: 2,
               resource: { buffer: cellStateStorage[1] },
+            },
+            {
+              binding: 3,
+              resource: { buffer: timeUniformBuffer },
             },
           ],
         }),
@@ -275,7 +296,7 @@
           entries: [
             {
               binding: 0,
-              resource: { buffer: uniformBuffer },
+              resource: { buffer: gridUniformBuffer },
             },
             {
               binding: 1,
@@ -284,6 +305,10 @@
             {
               binding: 2,
               resource: { buffer: cellStateStorage[0] },
+            },
+            {
+              binding: 3,
+              resource: { buffer: timeUniformBuffer },
             },
           ],
         }),
@@ -327,11 +352,10 @@
       const UPDATE_INTERVAL = 200; // Update every 200ms (5 times/sec)
       let step = 0; // Track how many simulation steps have been run
 
-      function updateGrid() {
+      function tick() {
         const encoder = device.createCommandEncoder();
         const computePass = encoder.beginComputePass();
 
-        console.log("computing");
         computePass.setPipeline(simulationPipeline);
         computePass.setBindGroup(0, bindGroups[step % 2]);
 
@@ -374,7 +398,7 @@
         // device.queue.submit([encoder.finish()]);
       }
 
-      setInterval(updateGrid, UPDATE_INTERVAL);
+      setInterval(tick, UPDATE_INTERVAL);
     </script>
   </body>
 </html>
